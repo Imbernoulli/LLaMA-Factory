@@ -1,20 +1,3 @@
-# Copyright 2025 HuggingFace Inc. and the LlamaFactory team.
-#
-# This code is inspired by the HuggingFace's transformers library.
-# https://github.com/huggingface/transformers/blob/v4.40.0/src/transformers/trainer_seq2seq.py
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 import json
 import os
 from types import MethodType
@@ -105,28 +88,44 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
         with the loss being the first element. Trainer keeps the first element and ignores the others.
         """
         weights = inputs.pop("weights", None)
-        outputs = model(**inputs)
-        
-        logits = outputs.get("logits")
-        labels = inputs.get("labels")
-        if weights is not None and logits is not None and labels is not None:
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
+        # If weights are not provided, fall back to the standard loss computation.
+        if weights is None:
+            return super().compute_loss(model, inputs, return_outputs)
 
-            loss_fct = torch.nn.CrossEntropyLoss(reduction="none", ignore_index=IGNORE_INDEX)
-            loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
-            loss = loss.view(shift_labels.size(0), -1).sum(dim=1) # per-sample loss
-            
-            weighted_loss = loss * weights
-            if self.finetuning_args.normalize_weighted_loss:
-                loss = weighted_loss.sum() / (weights.sum() + 1e-8) # an epsilon is added to avoid division by zero
-            else:
-                loss = weighted_loss.mean()
+        # If weights are provided, compute a custom weighted loss.
+        # We need to calculate the loss manually, so we extract labels and don't pass them to the model.
+        labels = inputs.pop("labels")
+        outputs = model(**inputs)
+        logits = outputs.get("logits")
+
+        # Shift so that tokens < n predict n
+        shift_logits = logits[..., :-1, :].contiguous()
+        shift_labels = labels[..., 1:].contiguous()
+
+        # Calculate per-token loss using CrossEntropyLoss with reduction='none'
+        loss_fct = torch.nn.CrossEntropyLoss(reduction="none", ignore_index=IGNORE_INDEX)
+        loss_per_token = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+        loss_per_token = loss_per_token.view(shift_labels.size(0), -1)
+
+        # Create a mask for valid (non-ignored) tokens
+        label_mask = (shift_labels != IGNORE_INDEX).float()
+        
+        # Compute the mean loss per sample by dividing the sum of token losses by the number of valid tokens
+        per_sample_loss = (loss_per_token * label_mask).sum(dim=1) / (label_mask.sum(dim=1) + 1e-8)
+
+        # Apply the sample weights to the per-sample losses
+        weighted_loss = per_sample_loss * weights
+
+        # Aggregate the weighted per-sample losses
+        if self.finetuning_args.normalize_weighted_loss:
+            # Normalize by the sum of weights for a weighted average
+            loss = weighted_loss.sum() / (weights.sum() + 1e-8)
         else:
-            loss = outputs.get("loss")
-        
+            # Simple mean of the weighted losses
+            loss = weighted_loss.mean()
+            
         return (loss, outputs) if return_outputs else loss
-        
+
     @override
     def prediction_step(
         self,
