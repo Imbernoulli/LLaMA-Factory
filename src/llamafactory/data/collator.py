@@ -95,6 +95,7 @@ class MultiModalDataCollatorForSeq2Seq(DataCollatorForSeq2Seq):
             raise ValueError("Template is required for MultiModalDataCollator.")
 
     def __call__(self, features: list[dict[str, Any]]) -> dict[str, "torch.Tensor"]:
+        batch_weights = [feature.pop("weight", 1.0) for feature in features]
         batch_images, batch_videos, batch_audios = [], [], []
         batch_imglens, batch_vidlens, batch_audlens, batch_input_ids = [], [], [], []
         for feature in features:
@@ -215,6 +216,7 @@ class MultiModalDataCollatorForSeq2Seq(DataCollatorForSeq2Seq):
             features["position_ids"] = torch.arange(seq_length).long().repeat(bsz, 1)
             return {"data": features, "input_ids": features["input_ids"], "labels": features["labels"]}
 
+        features["weights"] = torch.tensor(batch_weights, dtype=torch.float32)
         return features
 
 
@@ -255,6 +257,7 @@ class PairwiseDataCollatorWithPadding(MultiModalDataCollatorForSeq2Seq):
                     "input_ids": feature[f"{key}_input_ids"],
                     "attention_mask": feature[f"{key}_attention_mask"],
                     "labels": feature[f"{key}_labels"],
+                    "weight": feature["weight"],
                     "images": feature["images"],
                     "videos": feature["videos"],
                     "audios": feature["audios"],
@@ -277,6 +280,7 @@ class KTODataCollatorWithPadding(MultiModalDataCollatorForSeq2Seq):
                 "input_ids": feature["input_ids"],
                 "attention_mask": feature["attention_mask"],
                 "labels": feature["labels"],
+                "weight": feature["weight"],
                 "images": feature["images"],
                 "videos": feature["videos"],
                 "audios": feature["audios"],

@@ -395,6 +395,10 @@ class FinetuningArguments(
         default=False,
         metadata={"help": "Whether or not to train model in purely bf16 precision (without AMP)."},
     )
+    normalize_weighted_loss: bool = field(
+        default=True,
+        metadata={"help": "Whether to normalize the weighted loss by the sum of weights."},
+    )
     stage: Literal["pt", "sft", "rm", "ppo", "dpo", "kto"] = field(
         default="sft",
         metadata={"help": "Which stage will be performed in training."},

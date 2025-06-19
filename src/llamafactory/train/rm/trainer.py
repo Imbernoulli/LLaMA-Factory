@@ -95,6 +95,7 @@ class PairwiseTrainer(Trainer):
         Note that the first element will be removed from the output tuple.
         See: https://github.com/huggingface/transformers/blob/v4.40.0/src/transformers/trainer.py#L3842
         """
+        weights = inputs.pop("weights", None)
         _, _, values = model(**inputs, output_hidden_states=True, return_dict=True, use_cache=False)
         batch_size = inputs["input_ids"].size(0) // 2
         chosen_masks, rejected_masks = torch.split(inputs["attention_mask"], batch_size, dim=0)
@@ -103,7 +104,18 @@ class PairwiseTrainer(Trainer):
         rejected_scores = rejected_rewards.gather(dim=-1, index=(rejected_masks.sum(dim=-1, keepdim=True) - 1))
         chosen_scores, rejected_scores = chosen_scores.squeeze(), rejected_scores.squeeze()
 
-        loss = -torch.nn.functional.logsigmoid(chosen_scores.float() - rejected_scores.float()).mean()
+        losses = -torch.nn.functional.logsigmoid(chosen_scores.float() - rejected_scores.float())
+        
+        if weights is not None:
+            pair_weights = weights[:batch_size]
+            weighted_losses = losses * pair_weights
+            if self.finetuning_args.normalize_weighted_loss:
+                loss = weighted_losses.sum() / (pair_weights.sum() + 1e-8)
+            else:
+                loss = weighted_losses.mean()
+        else:
+            loss = losses.mean()
+
         if return_outputs:
             return loss, (loss, chosen_scores, rejected_scores)
         else:

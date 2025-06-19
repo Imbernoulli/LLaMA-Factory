@@ -19,7 +19,7 @@ import warnings
 from collections import defaultdict
 from contextlib import nullcontext
 from types import MethodType
-from typing import TYPE_CHECKING, Literal, Optional, Union
+from typing import TYPE_CHECKING, Any, Literal, Optional, Union
 
 import torch
 from transformers import Trainer
@@ -202,13 +202,15 @@ class CustomKTOTrainer(KTOTrainer):
 
         return reference_chosen_logps, reference_rejected_logps, reference_kl_logps
 
-    @override
     def get_batch_loss_metrics(
         self,
         model: "PreTrainedModel",
         batch: dict[str, "torch.Tensor"],
+        weights: Optional[torch.Tensor] = None,
     ) -> tuple["torch.Tensor", dict[str, "torch.Tensor"]]:
-        r"""Compute the DPO loss and other metrics for the given batch of inputs for train or test."""
+        """
+        Compute the KTO loss and other metrics for the given batch of inputs.
+        """
         metrics = {}
         (
             policy_chosen_logps,
@@ -218,9 +220,11 @@ class CustomKTOTrainer(KTOTrainer):
             policy_kl_logps,
             policy_chosen_logps_avg,
         ) = self.concatenated_forward(model, batch)
+        
         reference_chosen_logps, reference_rejected_logps, reference_kl_logps = self.compute_reference_log_probs(
             model, batch
         )
+
         losses, chosen_rewards, rejected_rewards, kl = self.kto_loss(
             policy_chosen_logps,
             policy_rejected_logps,
@@ -229,11 +233,27 @@ class CustomKTOTrainer(KTOTrainer):
             reference_rejected_logps,
             reference_kl_logps,
         )
-        losses = losses.nanmean()
 
-        if self.ftx_gamma > 1e-6 and len(policy_chosen_logps) > 0:  # remember to rescale
+        if weights is not None:
+            if self.finetuning_args.normalize_weighted_loss:
+                loss = (losses * weights).nansum() / (weights.nansum() + 1e-8)
+            else:
+                loss = (losses * weights).nanmean()
+        else:
+            loss = losses.nanmean()
+
+        if self.ftx_gamma > 1e-6 and len(policy_chosen_logps) > 0:
             sft_loss = -policy_chosen_logps_avg
-            losses += self.ftx_gamma * sft_loss.nanmean() / len(policy_chosen_logps) * len(batch["labels"])
+            if weights is not None:
+                chosen_weights = weights[batch["kto_tags"]]
+                if self.finetuning_args.normalize_weighted_loss:
+                    sft_loss_val = (sft_loss * chosen_weights).nansum() / (chosen_weights.nansum() + 1e-8)
+                else:
+                    sft_loss_val = (sft_loss * chosen_weights).nanmean()
+            else:
+                sft_loss_val = sft_loss.nanmean()
+            
+            loss += self.ftx_gamma * sft_loss_val / len(batch["labels"])
 
         num_chosen = len(chosen_rewards)
         num_rejected = len(rejected_rewards)
@@ -250,14 +270,25 @@ class CustomKTOTrainer(KTOTrainer):
             metrics["count/rejected"] = float(num_rejected)
 
         metrics["kl"] = kl.item()
-        return losses, metrics
+        return loss, metrics
 
     @override
     def compute_loss(
         self, model: "PreTrainedModel", inputs: dict[str, "torch.Tensor"], return_outputs: bool = False, **kwargs
     ) -> Union["torch.Tensor", tuple["torch.Tensor", list["torch.Tensor"]]]:
-        r"""Subclass and override to accept extra kwargs."""
-        return super().compute_loss(model, inputs, return_outputs)
+        r"""
+        This method is the core of the training loop. It directly calls `get_batch_loss_metrics`
+        to compute the loss and metrics.
+        """
+        weights = inputs.pop("weights", None)
+        loss, metrics = self.get_batch_loss_metrics(model, inputs, weights=weights)
+
+        if self.accelerator.is_main_process:
+            self.store_metrics(metrics, train_eval="train" if self.is_training else "eval")
+
+        if return_outputs:
+            return (loss, metrics)
+        return loss
 
     @override
     def log(self, logs: dict[str, float], *args, **kwargs) -> None:
@@ -281,9 +312,10 @@ class CustomKTOTrainer(KTOTrainer):
         metric_list = self.accelerator.reduce(metric_list, "sum").tolist()
         metric_dict: dict[str, float] = dict(zip(key_list, metric_list))
         for split in ["chosen", "rejected"]:  # accumulate average metrics from sums and lengths
-            if f"count/{split}" in metric_dict:
+            if f"count/{split}" in metric_dict and metric_dict[f"count/{split}"] > 0:
+                count = metric_dict[f"count/{split}"]
                 for key in ("rewards", "logps", "logits"):
-                    logs[f"{prefix}{key}/{split}"] = metric_dict[f"{key}/{split}_sum"] / metric_dict[f"count/{split}"]
+                    logs[f"{prefix}{key}/{split}"] = metric_dict[f"{key}/{split}_sum"] / count
                     del metric_dict[f"{key}/{split}_sum"]
                 del metric_dict[f"count/{split}"]
 

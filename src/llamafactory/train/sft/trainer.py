@@ -99,9 +99,34 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
         return super()._get_train_sampler(*args, **kwargs)
 
     @override
-    def compute_loss(self, model, inputs, *args, **kwargs):
-        return super().compute_loss(model, inputs, *args, **kwargs)
+    def compute_loss(self, model, inputs, return_outputs=False):
+        """
+        How the loss is computed by Trainer. By default, all models return a tuple (loss, ...)
+        with the loss being the first element. Trainer keeps the first element and ignores the others.
+        """
+        weights = inputs.pop("weights", None)
+        outputs = model(**inputs)
+        
+        logits = outputs.get("logits")
+        labels = inputs.get("labels")
+        if weights is not None and logits is not None and labels is not None:
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
 
+            loss_fct = torch.nn.CrossEntropyLoss(reduction="none", ignore_index=IGNORE_INDEX)
+            loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+            loss = loss.view(shift_labels.size(0), -1).sum(dim=1) # per-sample loss
+            
+            weighted_loss = loss * weights
+            if self.finetuning_args.normalize_weighted_loss:
+                loss = weighted_loss.sum() / (weights.sum() + 1e-8) # an epsilon is added to avoid division by zero
+            else:
+                loss = weighted_loss.mean()
+        else:
+            loss = outputs.get("loss")
+        
+        return (loss, outputs) if return_outputs else loss
+        
     @override
     def prediction_step(
         self,

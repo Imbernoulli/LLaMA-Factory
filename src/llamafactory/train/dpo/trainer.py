@@ -188,12 +188,14 @@ class CustomDPOTrainer(DPOTrainer):
 
         all_logits: torch.Tensor = model(**batch, return_dict=True, use_cache=False).logits.to(torch.float32)
         all_logps, valid_length = get_batch_logps(logits=all_logits, labels=batch["labels"])
+
         if self.loss_type in ["ipo", "orpo", "simpo"]:
             all_logps = all_logps / valid_length
 
         batch_size = batch["input_ids"].size(0) // 2
         chosen_logps, rejected_logps = all_logps.split(batch_size, dim=0)
         chosen_logits, rejected_logits = all_logits.split(batch_size, dim=0)
+        
         chosen_length, _ = valid_length.split(batch_size, dim=0)
 
         if self.loss_type in ["ipo", "orpo", "simpo"]:
@@ -221,14 +223,20 @@ class CustomDPOTrainer(DPOTrainer):
 
         return reference_chosen_logps, reference_rejected_logps
 
-    @override
     def get_batch_loss_metrics(
         self,
         model: "PreTrainedModel",
         batch: dict[str, "torch.Tensor"],
         train_eval: Literal["train", "eval"] = "train",
+        weights: Optional[torch.Tensor] = None,
     ) -> tuple["torch.Tensor", dict[str, "torch.Tensor"]]:
-        r"""Compute the DPO loss and other metrics for the given batch of inputs for train or test."""
+        """
+        Compute the DPO loss and other metrics for the given batch of inputs for train or test.
+
+        Modification:
+        - Added `weights` parameter to support sample re-weighting.
+        - Implemented conditional loss normalization based on `finetuning_args.normalize_weighted_loss`.
+        """
         metrics = {}
         (
             policy_chosen_logps,
@@ -246,8 +254,27 @@ class CustomDPOTrainer(DPOTrainer):
             reference_rejected_logps,
         )
         sft_loss = -policy_chosen_logps_avg
-        if self.ftx_gamma > 1e-6:
-            losses += self.ftx_gamma * sft_loss
+
+        if weights is not None:
+            pair_weights = weights[:losses.size(0)]
+
+            weighted_losses = losses * pair_weights
+            if self.finetuning_args.normalize_weighted_loss:
+                loss = weighted_losses.sum() / (pair_weights.sum() + 1e-8)
+            else:
+                loss = weighted_losses.mean()
+            
+            if self.ftx_gamma > 1e-6:
+                weighted_sft_loss = sft_loss * pair_weights
+                if self.finetuning_args.normalize_weighted_loss:
+                    sft_loss_val = weighted_sft_loss.sum() / (pair_weights.sum() + 1e-8)
+                else:
+                    sft_loss_val = weighted_sft_loss.mean()
+                loss += self.ftx_gamma * sft_loss_val
+        else:
+            loss = losses.mean()
+            if self.ftx_gamma > 1e-6:
+                loss += self.ftx_gamma * sft_loss.mean()
 
         prefix = "eval_" if train_eval == "eval" else ""
         metrics[f"{prefix}rewards/chosen"] = chosen_rewards.mean().item()
@@ -262,14 +289,25 @@ class CustomDPOTrainer(DPOTrainer):
             metrics[f"{prefix}sft_loss"] = sft_loss.mean().item()
             metrics[f"{prefix}odds_ratio_loss"] = ((losses - sft_loss) / self.beta).mean().item()
 
-        return losses.mean(), metrics
+        return loss, metrics
 
     @override
     def compute_loss(
         self, model: "PreTrainedModel", inputs: dict[str, "torch.Tensor"], return_outputs: bool = False, **kwargs
     ) -> Union["torch.Tensor", tuple["torch.Tensor", list["torch.Tensor"]]]:
-        r"""Subclass and override to accept extra kwargs."""
-        return super().compute_loss(model, inputs, return_outputs)
+        r"""
+        This method is the core of the training loop. It directly calls `get_batch_loss_metrics`
+        to compute the loss and metrics.
+        """
+        weights = inputs.pop("weights", None)
+        loss, metrics = self.get_batch_loss_metrics(model, inputs, train_eval="train", weights=weights)
+
+        if self.accelerator.is_main_process:
+            self.store_metrics(metrics, train_eval="train")
+
+        if return_outputs:
+            return (loss, metrics)
+        return loss
 
     @override
     def log(self, logs: dict[str, float], *args, **kwargs) -> None:

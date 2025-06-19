@@ -1,5 +1,5 @@
 ### model
-model_name_or_path: meta-llama/Meta-Llama-3-8B-Instruct
+model_name_or_path: /home/test/test12/bohan/models/Llama-3.2-3B-Instruct
 trust_remote_code: true
 
 ### method
@@ -9,10 +9,10 @@ finetuning_type: full
 deepspeed: examples/deepspeed/ds_z3_config.json  # choices: [ds_z0_config.json, ds_z2_config.json, ds_z3_config.json]
 
 ### dataset
-dataset: identity,alpaca_en_demo
+dataset: alpaca_en_demo
 template: llama3
 cutoff_len: 2048
-max_samples: 1000
+max_samples: 10000
 overwrite_cache: true
 preprocessing_num_workers: 16
 dataloader_num_workers: 4
@@ -37,9 +37,8 @@ bf16: true
 ddp_timeout: 180000000
 resume_from_checkpoint: null
 
-### eval
-# eval_dataset: alpaca_en_demo
-# val_size: 0.1
-# per_device_eval_batch_size: 1
-# eval_strategy: steps
-# eval_steps: 500
+## eval
+val_size: 0.1
+per_device_eval_batch_size: 1
+eval_strategy: steps
+eval_steps: 500
