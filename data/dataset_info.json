@@ -1,4 +1,32 @@
 {
+  "dxy": {
+  "file_name": "/scratch/gpfs/yl7690/projects/LLaMA-Factory/dxy.jsonl",
+  "formatting": "sharegpt",
+  "columns": {
+    "messages": "messages"
+  },
+  "tags": {
+    "role_tag": "role",
+    "content_tag": "content",
+    "user_tag": "user",
+    "assistant_tag": "assistant",
+    "system_tag": "system"
+  }
+  },
+  "formal": {
+  "file_name": "/scratch/gpfs/yl7690/projects/am-team/oss_formal.jsonl",
+  "formatting": "sharegpt",
+  "columns": {
+    "messages": "messages"
+  },
+  "tags": {
+    "role_tag": "role",
+    "content_tag": "content",
+    "user_tag": "user",
+    "assistant_tag": "assistant",
+    "system_tag": "system"
+  }
+  },
   "identity": {
     "file_name": "identity.json"
   },
